@@ -3,7 +3,7 @@ import re
 import sqlite3
 import asyncio
 import threading
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from functools import wraps
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import tempfile
@@ -30,7 +30,6 @@ TOKEN = os.getenv("BOT_TOKEN")
 CHANNEL_ID = os.getenv("CHANNEL_ID", "@musicdanial2023")
 ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID", "0"))
 
-# Render Web Service
 PORT = int(os.getenv("PORT", "10000"))
 
 # =========================================================
@@ -38,10 +37,20 @@ PORT = int(os.getenv("PORT", "10000"))
 # =========================================================
 
 PREVIEW_SECONDS = 30
+
 INSTAGRAM_ID = "@Deandaniall"
+
 INVITE_DELAY = 1.5
 
 DB = "musicdanial.db"
+
+# Telegram Bot API:
+# دانلود معمولی با get_file محدود است.
+# برای فایل‌های بزرگ‌تر از این مقدار، Preview ساخته نمی‌شود.
+DOWNLOAD_LIMIT = 20 * 1024 * 1024
+
+# حدود سقف ارسال معمولی Bot API
+MAX_SEND_SIZE = 50 * 1024 * 1024
 
 
 # =========================================================
@@ -56,28 +65,61 @@ if ADMIN_USER_ID == 0:
 
 
 # =========================================================
+# UTC TIME
+# =========================================================
+
+def utc_now():
+    return datetime.now(timezone.utc)
+
+
+def utc_now_iso():
+    return utc_now().isoformat()
+
+
+# =========================================================
 # RENDER HEALTH SERVER
 # =========================================================
 
 class HealthHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
+
         if self.path in ("/", "/health", "/healthz"):
+
             body = b"Music Danial Bot is running"
 
             self.send_response(200)
-            self.send_header("Content-Type", "text/plain; charset=utf-8")
-            self.send_header("Content-Length", str(len(body)))
+
+            self.send_header(
+                "Content-Type",
+                "text/plain; charset=utf-8"
+            )
+
+            self.send_header(
+                "Content-Length",
+                str(len(body))
+            )
+
             self.end_headers()
 
             self.wfile.write(body)
 
         else:
+
             body = b"Not Found"
 
             self.send_response(404)
-            self.send_header("Content-Type", "text/plain; charset=utf-8")
-            self.send_header("Content-Length", str(len(body)))
+
+            self.send_header(
+                "Content-Type",
+                "text/plain; charset=utf-8"
+            )
+
+            self.send_header(
+                "Content-Length",
+                str(len(body))
+            )
+
             self.end_headers()
 
             self.wfile.write(body)
@@ -87,12 +129,15 @@ class HealthHandler(BaseHTTPRequestHandler):
 
 
 def start_health_server():
+
     server = ThreadingHTTPServer(
         ("0.0.0.0", PORT),
         HealthHandler
     )
 
-    print(f"Health server running on 0.0.0.0:{PORT}")
+    print(
+        f"Health server running on 0.0.0.0:{PORT}"
+    )
 
     server.serve_forever()
 
@@ -102,6 +147,7 @@ def start_health_server():
 # =========================================================
 
 def db():
+
     con = sqlite3.connect(DB)
 
     con.execute("""
@@ -112,7 +158,8 @@ def db():
             caption TEXT,
             scheduled_at TEXT,
             status TEXT DEFAULT 'published',
-            created_at TEXT NOT NULL
+            created_at TEXT NOT NULL,
+            file_size INTEGER DEFAULT 0
         )
     """)
 
@@ -125,6 +172,33 @@ def db():
             last_seen TEXT NOT NULL
         )
     """)
+
+    # -----------------------------------------------------
+    # اگر دیتابیس قبلی باشد و file_size نداشته باشد
+    # -----------------------------------------------------
+
+    columns = con.execute(
+        "PRAGMA table_info(posts)"
+    ).fetchall()
+
+    column_names = [
+        column[1]
+        for column in columns
+    ]
+
+    if "file_size" not in column_names:
+
+        try:
+
+            con.execute(
+                """
+                ALTER TABLE posts
+                ADD COLUMN file_size INTEGER DEFAULT 0
+                """
+            )
+
+        except sqlite3.OperationalError:
+            pass
 
     con.commit()
 
@@ -146,7 +220,10 @@ def admin_only(function):
         if update.effective_user.id != ADMIN_USER_ID:
             return
 
-        return await function(update, context)
+        return await function(
+            update,
+            context
+        )
 
     return wrapper
 
@@ -162,7 +239,7 @@ def save_user(user):
 
     con = db()
 
-    now = datetime.utcnow().isoformat()
+    now = utc_now_iso()
 
     con.execute("""
         INSERT INTO users (
@@ -195,10 +272,16 @@ def save_user(user):
 # TRACK USERS
 # =========================================================
 
-async def track_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def track_user(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
 
     if update.effective_user:
-        save_user(update.effective_user)
+
+        save_user(
+            update.effective_user
+        )
 
 
 # =========================================================
@@ -247,6 +330,7 @@ def get_audio_from_reply(reply):
         return None
 
     if reply.audio:
+
         return reply.audio
 
     if reply.document:
@@ -254,6 +338,7 @@ def get_audio_from_reply(reply):
         mime = reply.document.mime_type or ""
 
         if mime.startswith("audio/"):
+
             return reply.document
 
         filename = reply.document.file_name or ""
@@ -268,7 +353,10 @@ def get_audio_from_reply(reply):
             ".opus"
         )
 
-        if filename.lower().endswith(audio_extensions):
+        if filename.lower().endswith(
+            audio_extensions
+        ):
+
             return reply.document
 
     return None
@@ -278,7 +366,10 @@ def get_audio_from_reply(reply):
 # GET AUDIO DURATION
 # =========================================================
 
-async def get_audio_duration(ffmpeg, source):
+async def get_audio_duration(
+    ffmpeg,
+    source
+):
 
     command = [
         ffmpeg,
@@ -294,7 +385,9 @@ async def get_audio_duration(ffmpeg, source):
 
     _, stderr = await process.communicate()
 
-    text = stderr.decode(errors="ignore")
+    text = stderr.decode(
+        errors="ignore"
+    )
 
     match = re.search(
         r"Duration:\s*(\d+):(\d+):([\d.]+)",
@@ -302,11 +395,20 @@ async def get_audio_duration(ffmpeg, source):
     )
 
     if not match:
+
         return 60.0
 
-    hours = int(match.group(1))
-    minutes = int(match.group(2))
-    seconds = float(match.group(3))
+    hours = int(
+        match.group(1)
+    )
+
+    minutes = int(
+        match.group(2)
+    )
+
+    seconds = float(
+        match.group(3)
+    )
 
     return (
         hours * 3600
@@ -316,17 +418,109 @@ async def get_audio_duration(ffmpeg, source):
 
 
 # =========================================================
-# PUBLISH MUSIC
-#
-# 1. دانلود آهنگ
-# 2. پیدا کردن مدت آهنگ
-# 3. انتخاب وسط آهنگ
-# 4. ساخت Preview
-# 5. ارسال Preview
-# 6. ارسال آهنگ کامل
+# SEND LARGE FILE
 # =========================================================
 
-async def publish_music(bot, file_id, caption_text):
+async def send_large_audio(
+    bot,
+    file_id,
+    caption_text
+):
+
+    print(
+        "Large file detected."
+    )
+
+    print(
+        "Sending directly using Telegram file_id..."
+    )
+
+    try:
+
+        message = await bot.send_audio(
+            chat_id=CHANNEL_ID,
+            audio=file_id,
+            caption=caption_text
+        )
+
+        print(
+            "Large file sent successfully."
+        )
+
+        return message
+
+    except Exception as error:
+
+        print(
+            "Large file send error:",
+            error
+        )
+
+        raise RuntimeError(
+            "ارسال فایل بزرگ انجام نشد.\n\n"
+            f"{error}"
+        )
+
+
+# =========================================================
+# PUBLISH MUSIC
+#
+# فایل <= 20MB:
+#   Preview از وسط آهنگ
+#   سپس آهنگ کامل
+#
+# فایل > 20MB:
+#   بدون دانلود مجدد
+#   ارسال مستقیم با file_id
+#
+# =========================================================
+
+async def publish_music(
+    bot,
+    file_id,
+    caption_text,
+    file_size=None
+):
+
+    # =====================================================
+    # CHECK FILE SIZE
+    # =====================================================
+
+    if file_size is None:
+
+        print(
+            "File size is unknown."
+        )
+
+    else:
+
+        size_mb = (
+            file_size
+            / (1024 * 1024)
+        )
+
+        print(
+            f"File size: {size_mb:.2f} MB"
+        )
+
+    # =====================================================
+    # LARGE FILE
+    # =====================================================
+
+    if (
+        file_size is not None
+        and file_size > DOWNLOAD_LIMIT
+    ):
+
+        return await send_large_audio(
+            bot,
+            file_id,
+            caption_text
+        )
+
+    # =====================================================
+    # NORMAL FILE
+    # =====================================================
 
     with tempfile.TemporaryDirectory() as tmp:
 
@@ -344,7 +538,13 @@ async def publish_music(bot, file_id, caption_text):
         # DOWNLOAD
         # -------------------------------------------------
 
-        telegram_file = await bot.get_file(file_id)
+        print(
+            "Downloading file for preview..."
+        )
+
+        telegram_file = await bot.get_file(
+            file_id
+        )
 
         await telegram_file.download_to_drive(
             source
@@ -363,6 +563,10 @@ async def publish_music(bot, file_id, caption_text):
         duration = await get_audio_duration(
             ffmpeg,
             source
+        )
+
+        print(
+            f"Audio duration: {duration:.2f} seconds"
         )
 
         # -------------------------------------------------
@@ -393,6 +597,10 @@ async def publish_music(bot, file_id, caption_text):
         # -------------------------------------------------
         # CREATE PREVIEW
         # -------------------------------------------------
+
+        print(
+            "Creating preview..."
+        )
 
         command = [
             ffmpeg,
@@ -440,7 +648,14 @@ async def publish_music(bot, file_id, caption_text):
         # SEND PREVIEW
         # -------------------------------------------------
 
-        with open(preview, "rb") as preview_file:
+        print(
+            "Sending preview..."
+        )
+
+        with open(
+            preview,
+            "rb"
+        ) as preview_file:
 
             await bot.send_audio(
                 chat_id=CHANNEL_ID,
@@ -456,10 +671,18 @@ async def publish_music(bot, file_id, caption_text):
         # SEND FULL SONG
         # -------------------------------------------------
 
+        print(
+            "Sending full song..."
+        )
+
         full_message = await bot.send_audio(
             chat_id=CHANNEL_ID,
             audio=file_id,
             caption=caption_text
+        )
+
+        print(
+            "Full song sent successfully."
         )
 
         return full_message
@@ -469,7 +692,10 @@ async def publish_music(bot, file_id, caption_text):
 # START
 # =========================================================
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def start(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
 
     user = update.effective_user
 
@@ -481,6 +707,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user.id == ADMIN_USER_ID:
 
         await update.message.reply_text(
+
             "🎵 Music Danial Manager\n\n"
 
             "🎧 انتشار موزیک:\n"
@@ -546,11 +773,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =========================================================
 
 @admin_only
-async def post(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def post(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
 
     if not update.message.reply_to_message:
 
         await update.message.reply_text(
+
             "روی فایل موزیک Reply کن و سپس بنویس:\n\n"
             "/post عنوان | خواننده"
         )
@@ -559,7 +790,9 @@ async def post(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     reply = update.message.reply_to_message
 
-    media = get_audio_from_reply(reply)
+    media = get_audio_from_reply(
+        reply
+    )
 
     if not media:
 
@@ -595,21 +828,49 @@ async def post(update: Update, context: ContextTypes.DEFAULT_TYPE):
         artist
     )
 
+    # -----------------------------------------------------
+    # FILE SIZE
+    # -----------------------------------------------------
+
+    file_size = getattr(
+        media,
+        "file_size",
+        None
+    )
+
+    if file_size:
+
+        print(
+            f"POST file size: "
+            f"{file_size / (1024 * 1024):.2f} MB"
+        )
+
+    # -----------------------------------------------------
+    # PUBLISH
+    # -----------------------------------------------------
+
     try:
 
         message = await publish_music(
             context.bot,
             media.file_id,
-            caption
+            caption,
+            file_size
         )
 
     except Exception as error:
 
         await update.message.reply_text(
-            f"❌ انتشار انجام نشد:\n\n{error}"
+
+            f"❌ انتشار انجام نشد:\n\n"
+            f"{error}"
         )
 
         return
+
+    # -----------------------------------------------------
+    # SAVE POST
+    # -----------------------------------------------------
 
     con = db()
 
@@ -619,26 +880,49 @@ async def post(update: Update, context: ContextTypes.DEFAULT_TYPE):
             telegram_message_id,
             file_id,
             caption,
-            created_at
+            created_at,
+            file_size
         )
-        VALUES (?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?)
         """,
         (
             message.message_id,
             media.file_id,
             caption,
-            datetime.utcnow().isoformat()
+            utc_now_iso(),
+            file_size or 0
         )
     )
 
     con.commit()
     con.close()
 
-    await update.message.reply_text(
-        "✅ موزیک منتشر شد!\n\n"
-        "📸 پیش‌نمایش ۳۰ ثانیه‌ای از وسط آهنگ\n"
-        "🎵 سپس آهنگ کامل"
-    )
+    # -----------------------------------------------------
+    # RESPONSE
+    # -----------------------------------------------------
+
+    if (
+        file_size
+        and file_size > DOWNLOAD_LIMIT
+    ):
+
+        await update.message.reply_text(
+
+            "✅ موزیک منتشر شد!\n\n"
+
+            "🎵 فایل بزرگ بود و مستقیم ارسال شد.\n"
+            "ℹ️ برای فایل‌های بزرگ Preview ساخته نمی‌شود."
+        )
+
+    else:
+
+        await update.message.reply_text(
+
+            "✅ موزیک منتشر شد!\n\n"
+
+            "📸 پیش‌نمایش ۳۰ ثانیه‌ای از وسط آهنگ\n"
+            "🎵 سپس آهنگ کامل"
+        )
 
 
 # =========================================================
@@ -646,11 +930,15 @@ async def post(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =========================================================
 
 @admin_only
-async def schedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def schedule(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
 
     if not update.message.reply_to_message:
 
         await update.message.reply_text(
+
             "روی فایل موزیک Reply کن و سپس:\n\n"
             "/schedule عنوان | خواننده | دقیقه"
         )
@@ -669,6 +957,7 @@ async def schedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(parts) < 3:
 
         await update.message.reply_text(
+
             "فرمت درست:\n\n"
             "/schedule عنوان | خواننده | دقیقه"
         )
@@ -676,18 +965,23 @@ async def schedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     title = parts[0]
+
     artist = parts[1]
 
     try:
 
-        minutes = int(parts[2])
+        minutes = int(
+            parts[2]
+        )
 
         if minutes < 1 or minutes > 10080:
+
             raise ValueError
 
     except ValueError:
 
         await update.message.reply_text(
+
             "❌ دقیقه باید بین 1 تا 10080 باشد."
         )
 
@@ -695,11 +989,14 @@ async def schedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     reply = update.message.reply_to_message
 
-    media = get_audio_from_reply(reply)
+    media = get_audio_from_reply(
+        reply
+    )
 
     if not media:
 
         await update.message.reply_text(
+
             "❌ پیام Reply شده باید فایل صوتی باشد."
         )
 
@@ -710,10 +1007,28 @@ async def schedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
         artist
     )
 
+    # -----------------------------------------------------
+    # FILE SIZE
+    # -----------------------------------------------------
+
+    file_size = getattr(
+        media,
+        "file_size",
+        None
+    )
+
+    # -----------------------------------------------------
+    # SCHEDULE TIME
+    # -----------------------------------------------------
+
     scheduled_time = (
-        datetime.utcnow()
+        utc_now()
         + timedelta(minutes=minutes)
     ).isoformat()
+
+    # -----------------------------------------------------
+    # DATABASE
+    # -----------------------------------------------------
 
     con = db()
 
@@ -724,16 +1039,18 @@ async def schedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
             caption,
             scheduled_at,
             status,
-            created_at
+            created_at,
+            file_size
         )
-        VALUES (?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?)
         """,
         (
             media.file_id,
             caption,
             scheduled_time,
             "scheduled",
-            datetime.utcnow().isoformat()
+            utc_now_iso(),
+            file_size or 0
         )
     )
 
@@ -742,13 +1059,22 @@ async def schedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
     con.commit()
     con.close()
 
-    async def publish_job(job_context):
+    # -----------------------------------------------------
+    # PUBLISH JOB
+    # -----------------------------------------------------
+
+    async def publish_job(
+        job_context
+    ):
 
         con2 = db()
 
         row = con2.execute(
             """
-            SELECT file_id, caption
+            SELECT
+                file_id,
+                caption,
+                file_size
             FROM posts
             WHERE id=?
             AND status='scheduled'
@@ -759,6 +1085,7 @@ async def schedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not row:
 
             con2.close()
+
             return
 
         try:
@@ -766,7 +1093,8 @@ async def schedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
             message = await publish_music(
                 job_context.bot,
                 row[0],
-                row[1]
+                row[1],
+                row[2]
             )
 
             con2.execute(
@@ -784,7 +1112,16 @@ async def schedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             con2.commit()
 
-        except Exception:
+            print(
+                f"Scheduled post #{post_id} published."
+            )
+
+        except Exception as error:
+
+            print(
+                f"Scheduled post #{post_id} error:",
+                error
+            )
 
             con2.execute(
                 """
@@ -799,6 +1136,10 @@ async def schedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         con2.close()
 
+    # -----------------------------------------------------
+    # JOB
+    # -----------------------------------------------------
+
     context.job_queue.run_once(
         publish_job,
         when=minutes * 60,
@@ -806,6 +1147,7 @@ async def schedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     await update.message.reply_text(
+
         f"🕐 موزیک زمان‌بندی شد.\n\n"
         f"شناسه: {post_id}\n"
         f"زمان: {minutes} دقیقه"
@@ -817,7 +1159,10 @@ async def schedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =========================================================
 
 @admin_only
-async def queue(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def queue(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
 
     con = db()
 
@@ -849,6 +1194,7 @@ async def queue(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     await update.message.reply_text(
+
         "📋 صف زمان‌بندی:\n\n"
         + text
     )
@@ -859,7 +1205,10 @@ async def queue(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =========================================================
 
 @admin_only
-async def delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def delete(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
 
     try:
 
@@ -925,7 +1274,9 @@ async def delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as error:
 
         await update.message.reply_text(
-            f"❌ حذف انجام نشد:\n{error}"
+
+            f"❌ حذف انجام نشد:\n"
+            f"{error}"
         )
 
     finally:
@@ -938,7 +1289,10 @@ async def delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =========================================================
 
 @admin_only
-async def pin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def pin(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
 
     try:
 
@@ -990,7 +1344,9 @@ async def pin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as error:
 
         await update.message.reply_text(
-            f"❌ پین انجام نشد:\n{error}"
+
+            f"❌ پین انجام نشد:\n"
+            f"{error}"
         )
 
 
@@ -999,7 +1355,10 @@ async def pin(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =========================================================
 
 @admin_only
-async def desc(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def desc(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
 
     text = " ".join(
         context.args
@@ -1027,7 +1386,9 @@ async def desc(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as error:
 
         await update.message.reply_text(
-            f"❌ تغییر توضیحات انجام نشد:\n{error}"
+
+            f"❌ تغییر توضیحات انجام نشد:\n"
+            f"{error}"
         )
 
 
@@ -1036,7 +1397,10 @@ async def desc(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =========================================================
 
 @admin_only
-async def invite(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def invite(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
 
     try:
 
@@ -1045,6 +1409,7 @@ async def invite(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
         await update.message.reply_text(
+
             "🔗 لینک عضویت مستقیم:\n\n"
             f"{link}\n\n"
             "👥 این لینک را می‌توانی برای دیگران بفرستی."
@@ -1053,7 +1418,9 @@ async def invite(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as error:
 
         await update.message.reply_text(
-            f"❌ ساخت لینک انجام نشد:\n{error}"
+
+            f"❌ ساخت لینک انجام نشد:\n"
+            f"{error}"
         )
 
 
@@ -1062,7 +1429,10 @@ async def invite(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =========================================================
 
 @admin_only
-async def inviteid(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def inviteid(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
 
     try:
 
@@ -1085,9 +1455,13 @@ async def inviteid(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
         await context.bot.send_message(
+
             chat_id=user_id,
+
             text=(
+
                 "🎵 دعوت به Music Danial\n\n"
+
                 "🔗 لینک عضویت:\n\n"
                 f"{link}"
             )
@@ -1100,7 +1474,9 @@ async def inviteid(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as error:
 
         await update.message.reply_text(
-            f"❌ ارسال دعوت انجام نشد:\n{error}"
+
+            f"❌ ارسال دعوت انجام نشد:\n"
+            f"{error}"
         )
 
 
@@ -1109,7 +1485,10 @@ async def inviteid(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =========================================================
 
 @admin_only
-async def sendinvites(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def sendinvites(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
 
     try:
 
@@ -1120,7 +1499,9 @@ async def sendinvites(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as error:
 
         await update.message.reply_text(
-            f"❌ ساخت لینک انجام نشد:\n{error}"
+
+            f"❌ ساخت لینک انجام نشد:\n"
+            f"{error}"
         )
 
         return
@@ -1146,10 +1527,13 @@ async def sendinvites(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     sent = 0
+
     failed = 0
 
     await update.message.reply_text(
-        f"📨 ارسال دعوت برای {len(users)} کاربر شروع شد..."
+
+        f"📨 ارسال دعوت برای "
+        f"{len(users)} کاربر شروع شد..."
     )
 
     for row in users:
@@ -1159,12 +1543,19 @@ async def sendinvites(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
 
             await context.bot.send_message(
+
                 chat_id=user_id,
+
                 text=(
+
                     "🎵 Music Danial\n\n"
+
                     "برای عضویت در کانال:\n\n"
+
                     f"🔗 {link}\n\n"
-                    "👥 می‌توانی این لینک را برای دوستانت هم بفرستی."
+
+                    "👥 می‌توانی این لینک را "
+                    "برای دوستانت هم بفرستی."
                 )
             )
 
@@ -1179,7 +1570,9 @@ async def sendinvites(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     await update.message.reply_text(
+
         "✅ ارسال دعوت تمام شد.\n\n"
+
         f"📨 ارسال موفق: {sent}\n"
         f"❌ ناموفق: {failed}"
     )
@@ -1190,7 +1583,10 @@ async def sendinvites(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =========================================================
 
 @admin_only
-async def users(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def users(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
 
     con = db()
 
@@ -1223,19 +1619,25 @@ async def users(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for row in rows:
 
         user_id = row[0]
+
         username = row[1]
+
         first_name = row[2]
 
         if username:
+
             name = f"@{username}"
 
         elif first_name:
+
             name = first_name
 
         else:
+
             name = "بدون نام"
 
         text += (
+
             f"👤 {name}\n"
             f"🆔 {user_id}\n\n"
         )
@@ -1249,7 +1651,10 @@ async def users(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ERROR HANDLER
 # =========================================================
 
-async def error_handler(update, context):
+async def error_handler(
+    update,
+    context
+):
 
     print(
         "BOT ERROR:",
@@ -1263,10 +1668,18 @@ async def error_handler(update, context):
 
 def main():
 
-    # Initialize database
-    db().close()
+    # -----------------------------------------------------
+    # DATABASE
+    # -----------------------------------------------------
 
-    # Start Render health server
+    con = db()
+
+    con.close()
+
+    # -----------------------------------------------------
+    # HEALTH SERVER
+    # -----------------------------------------------------
+
     health_thread = threading.Thread(
         target=start_health_server,
         daemon=True
@@ -1274,14 +1687,20 @@ def main():
 
     health_thread.start()
 
-    # Create Telegram application
+    # -----------------------------------------------------
+    # TELEGRAM APPLICATION
+    # -----------------------------------------------------
+
     application = (
         Application.builder()
         .token(TOKEN)
         .build()
     )
 
-    # Commands
+    # -----------------------------------------------------
+    # COMMANDS
+    # -----------------------------------------------------
+
     application.add_handler(
         CommandHandler(
             "start",
@@ -1359,7 +1778,10 @@ def main():
         )
     )
 
-    # Track users
+    # -----------------------------------------------------
+    # TRACK USERS
+    # -----------------------------------------------------
+
     application.add_handler(
         MessageHandler(
             filters.ALL & ~filters.COMMAND,
@@ -1367,18 +1789,50 @@ def main():
         )
     )
 
+    # -----------------------------------------------------
+    # ERROR
+    # -----------------------------------------------------
+
     application.add_error_handler(
         error_handler
     )
 
-    print("===================================")
-    print("Music Danial Manager")
-    print("Telegram Bot: STARTING")
-    print(f"Render PORT: {PORT}")
-    print("Health: /health")
-    print("===================================")
+    # -----------------------------------------------------
+    # START
+    # -----------------------------------------------------
 
-    # Start polling
+    print(
+        "==================================="
+    )
+
+    print(
+        "Music Danial Manager"
+    )
+
+    print(
+        "Telegram Bot: STARTING"
+    )
+
+    print(
+        f"Render PORT: {PORT}"
+    )
+
+    print(
+        "Health: /health"
+    )
+
+    print(
+        "Large File Mode: ENABLED"
+    )
+
+    print(
+        "==================================="
+    )
+
+    # -----------------------------------------------------
+    # POLLING
+    # -----------------------------------------------------
+
     application.run_polling(
         drop_pending_updates=True
     )
@@ -1389,4 +1843,5 @@ def main():
 # =========================================================
 
 if __name__ == "__main__":
+
     main()
