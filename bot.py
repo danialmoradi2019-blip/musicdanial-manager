@@ -183,12 +183,17 @@ command = [
     "4",
     preview
 ]
+probe = await asyncio.create_subprocess_exec(
+    *probe_command,
+    stdout=asyncio.subprocess.PIPE,
+    stderr=asyncio.subprocess.PIPE
+)
 
-        process = await asyncio.create_subprocess_exec(
-            *command,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
-        )
+process = await asyncio.create_subprocess_exec(
+    *probe_command,
+    stdout=asyncio.subprocess.PIPE,
+    stderr=asyncio.subprocess.PIPE
+)
 
         _, stderr = await process.communicate()
 
