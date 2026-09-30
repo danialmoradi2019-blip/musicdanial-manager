@@ -19,15 +19,18 @@ CHANNEL_ID = os.getenv("CHANNEL_ID", "@musicdanial2023")
 ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID", "0"))
 DB = "musicdanial.db"
 # =========================
-# PREVIEW SETTINGS
+# SETTINGS
 # =========================
 PREVIEW_SECONDS = 30
 INSTAGRAM_ID = "@Deandaniall"
+# فاصله ارسال دعوت به کاربران
+INVITE_DELAY = 1.5
 # =========================
 # DATABASE
 # =========================
 def db():
     con = sqlite3.connect(DB)
+    # موزیک‌های منتشرشده
     con.execute("""
         CREATE TABLE IF NOT EXISTS posts (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -37,6 +40,16 @@ def db():
             scheduled_at TEXT,
             status TEXT DEFAULT 'published',
             created_at TEXT NOT NULL
+        )
+    """)
+    # کاربران ربات
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            user_id INTEGER PRIMARY KEY,
+            username TEXT,
+            first_name TEXT,
+            created_at TEXT NOT NULL,
+            last_seen TEXT NOT NULL
         )
     """)
     con.commit()
@@ -54,6 +67,37 @@ def admin_only(function):
         return await function(update, context)
     return wrapper
 # =========================
+# SAVE USER
+# =========================
+def save_user(user):
+    if not user:
+        return
+    con = db()
+    now = datetime.utcnow().isoformat()
+    con.execute("""
+        INSERT INTO users (
+            user_id,
+            username,
+            first_name,
+            created_at,
+            last_seen
+        )
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(user_id)
+        DO UPDATE SET
+            username=excluded.username,
+            first_name=excluded.first_name,
+            last_seen=excluded.last_seen
+    """, (
+        user.id,
+        user.username or "",
+        user.first_name or "",
+        now,
+        now
+    ))
+    con.commit()
+    con.close()
+# =========================
 # CAPTION
 # =========================
 def make_caption(title, artist=""):
@@ -69,6 +113,16 @@ def make_caption(title, artist=""):
         f"@musicdanial2023"
     )
 # =========================
+# CREATE DIRECT INVITE LINK
+# =========================
+async def create_direct_invite(bot):
+    link = await bot.create_chat_invite_link(
+        chat_id=CHANNEL_ID,
+        name="Music Danial",
+        creates_join_request=False
+    )
+    return link.invite_link
+# =========================
 # PUBLISH MUSIC
 # 30 SECOND PREVIEW
 # FROM MIDDLE OF SONG
@@ -78,14 +132,18 @@ async def publish_music(bot, file_id, caption_text):
     with tempfile.TemporaryDirectory() as tmp:
         source = os.path.join(tmp, "source")
         preview = os.path.join(tmp, "preview.mp3")
-        # Download audio from Telegram
+        # -------------------------
+        # Download audio
+        # -------------------------
         telegram_file = await bot.get_file(file_id)
         await telegram_file.download_to_drive(source)
-        # Get FFmpeg
+        # -------------------------
+        # FFmpeg
+        # -------------------------
         ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
-        # ---------------------------------
-        # Find song duration
-        # ---------------------------------
+        # -------------------------
+        # Find duration
+        # -------------------------
         probe_command = [
             ffmpeg,
             "-i",
@@ -112,16 +170,16 @@ async def publish_music(bot, file_id, caption_text):
             )
         else:
             duration = 60
-        # ---------------------------------
-        # Calculate middle of song
-        # ---------------------------------
+        # -------------------------
+        # Middle of song
+        # -------------------------
         start_time = max(
             0,
             (duration / 2) - (PREVIEW_SECONDS / 2)
         )
-        # ---------------------------------
-        # Create 30 second preview
-        # ---------------------------------
+        # -------------------------
+        # Create preview
+        # -------------------------
         command = [
             ffmpeg,
             "-y",
@@ -152,9 +210,9 @@ async def publish_music(bot, file_id, caption_text):
             raise RuntimeError(
                 "فایل پیش‌نمایش ساخته نشد."
             )
-        # ---------------------------------
+        # -------------------------
         # Send preview
-        # ---------------------------------
+        # -------------------------
         with open(preview, "rb") as preview_file:
             await bot.send_audio(
                 chat_id=CHANNEL_ID,
@@ -165,9 +223,9 @@ async def publish_music(bot, file_id, caption_text):
                 ),
                 title="Music Danial - Preview"
             )
-        # ---------------------------------
+        # -------------------------
         # Send full song
-        # ---------------------------------
+        # -------------------------
         full_message = await bot.send_audio(
             chat_id=CHANNEL_ID,
             audio=file_id,
@@ -177,17 +235,51 @@ async def publish_music(bot, file_id, caption_text):
 # =========================
 # START
 # =========================
-@admin_only
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "🎵 Music Danial Manager آماده است.\n\n"
-        "/post عنوان | خواننده\n"
-        "/schedule عنوان | خواننده | دقیقه\n"
-        "/queue\n"
-        "/delete شناسه\n"
-        "/pin شناسه\n"
-        "/desc متن"
-    )
+    user = update.effective_user
+    if not user:
+        return
+    # ذخیره کاربر
+    save_user(user)
+    # -------------------------
+    # اگر ادمین است
+    # -------------------------
+    if user.id == ADMIN_USER_ID:
+        await update.message.reply_text(
+            "🎵 Music Danial Manager آماده است.\n\n"
+            "🎧 موزیک:\n"
+            "/post عنوان | خواننده\n"
+            "/schedule عنوان | خواننده | دقیقه\n"
+            "/queue\n"
+            "/delete شناسه\n"
+            "/pin شناسه\n"
+            "/desc متن\n\n"
+            "👥 مدیریت دعوت:\n"
+            "/invite\n"
+            "/sendinvites\n"
+            "/inviteid USER_ID\n"
+            "/users"
+        )
+        return
+    # -------------------------
+    # کاربر عادی
+    # -------------------------
+    try:
+        invite_link = await create_direct_invite(
+            context.bot
+        )
+        await update.message.reply_text(
+            "🎵 به Music Danial خوش آمدی ❤️\n\n"
+            "🎧 برای عضویت در کانال روی لینک زیر بزن:\n\n"
+            f"🔗 {invite_link}\n\n"
+            "👥 می‌توانی این لینک را برای دوستانت هم بفرستی "
+            "تا آنها هم مستقیم وارد کانال شوند."
+        )
+    except Exception as error:
+        await update.message.reply_text(
+            "🎵 به Music Danial خوش آمدی ❤️\n\n"
+            "لینک عضویت فعلاً آماده نیست."
+        )
 # =========================
 # POST
 # =========================
@@ -525,6 +617,205 @@ async def desc(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "✅ توضیحات کانال تغییر کرد."
     )
+# =========================================================
+# INVITE SYSTEM
+# =========================================================
+# =========================
+# CREATE INVITE
+# =========================
+@admin_only
+async def invite(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        link = await create_direct_invite(
+            context.bot
+        )
+    except Exception as error:
+        await update.message.reply_text(
+            "❌ ساخت لینک دعوت انجام نشد.\n\n"
+            f"{error}\n\n"
+            "مطمئن شو ربات در کانال Admin است و "
+            "اجازه مدیریت لینک‌های دعوت را دارد."
+        )
+        return
+    await update.message.reply_text(
+        "🔗 لینک عضویت مستقیم Music Danial:\n\n"
+        f"{link}\n\n"
+        "✅ بدون درخواست عضویت\n"
+        "✅ بدون تأیید ادمین\n"
+        "👥 قابل ارسال برای دیگران"
+    )
+# =========================
+# MY INVITE
+# هر کاربر لینک دعوت می‌گیرد
+# =========================
+async def myinvite(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if not user:
+        return
+    save_user(user)
+    try:
+        link = await create_direct_invite(
+            context.bot
+        )
+        await update.message.reply_text(
+            "🔗 لینک دعوت Music Danial:\n\n"
+            f"{link}\n\n"
+            "👥 این لینک را برای دوستانت بفرست "
+            "تا مستقیم وارد کانال شوند."
+        )
+    except Exception as error:
+        await update.message.reply_text(
+            "❌ ساخت لینک دعوت انجام نشد."
+        )
+# =========================
+# SEND INVITE TO ONE USER
+# =========================
+@admin_only
+async def inviteid(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        user_id = int(context.args[0])
+    except (IndexError, ValueError):
+        await update.message.reply_text(
+            "فرمت درست:\n\n"
+            "/inviteid USER_ID"
+        )
+        return
+    # بررسی اینکه کاربر قبلاً ربات را Start کرده
+    con = db()
+    row = con.execute(
+        """
+        SELECT user_id, first_name, username
+        FROM users
+        WHERE user_id=?
+        """,
+        (user_id,)
+    ).fetchone()
+    con.close()
+    if not row:
+        await update.message.reply_text(
+            "❌ این User ID در لیست کاربران ربات نیست.\n\n"
+            "کاربر باید ابتدا ربات را Start کند."
+        )
+        return
+    try:
+        link = await create_direct_invite(
+            context.bot
+        )
+        await context.bot.send_message(
+            chat_id=user_id,
+            text=(
+                "🎵 دعوت به Music Danial\n\n"
+                "برای عضویت مستقیم در کانال روی لینک زیر بزن:\n\n"
+                f"🔗 {link}\n\n"
+                "👥 می‌توانی این لینک را برای دوستانت هم بفرستی."
+            )
+        )
+        await update.message.reply_text(
+            f"✅ دعوت برای کاربر {user_id} ارسال شد."
+        )
+    except Exception as error:
+        await update.message.reply_text(
+            "❌ ارسال دعوت انجام نشد.\n\n"
+            f"{error}"
+        )
+# =========================
+# SEND INVITES TO ALL USERS
+# =========================
+@admin_only
+async def sendinvites(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "⏳ ارسال دعوت‌ها شروع شد...\n\n"
+        "برای جلوگیری از ارسال بیش‌ازحد، بین پیام‌ها فاصله گذاشته شده."
+    )
+    # ساخت یک لینک مشترک
+    try:
+        link = await create_direct_invite(
+            context.bot
+        )
+    except Exception as error:
+        await update.message.reply_text(
+            f"❌ ساخت لینک دعوت انجام نشد:\n{error}"
+        )
+        return
+    con = db()
+    users = con.execute(
+        """
+        SELECT user_id
+        FROM users
+        ORDER BY created_at ASC
+        """
+    ).fetchall()
+    con.close()
+    total = len(users)
+    sent = 0
+    failed = 0
+    for (user_id,) in users:
+        try:
+            await context.bot.send_message(
+                chat_id=user_id,
+                text=(
+                    "🎵 Music Danial\n\n"
+                    "🔗 برای عضویت مستقیم در کانال روی لینک زیر بزن:\n\n"
+                    f"{link}\n\n"
+                    "👥 این لینک را می‌توانی برای دوستانت "
+                    "هم ارسال کنی."
+                )
+            )
+            sent += 1
+        except Exception:
+            failed += 1
+        # فاصله بین ارسال‌ها
+        await asyncio.sleep(INVITE_DELAY)
+    await update.message.reply_text(
+        "✅ ارسال دعوت‌ها تمام شد.\n\n"
+        f"👥 کل کاربران: {total}\n"
+        f"📨 ارسال موفق: {sent}\n"
+        f"❌ ناموفق: {failed}"
+    )
+# =========================
+# USERS
+# نمایش کاربران ذخیره‌شده
+# =========================
+@admin_only
+async def users(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    con = db()
+    rows = con.execute(
+        """
+        SELECT user_id, username, first_name, created_at
+        FROM users
+        ORDER BY created_at DESC
+        LIMIT 100
+        """
+    ).fetchall()
+    count = con.execute(
+        """
+        SELECT COUNT(*)
+        FROM users
+        """
+    ).fetchone()[0]
+    con.close()
+    if not rows:
+        await update.message.reply_text(
+            "📋 هنوز هیچ کاربری ربات را Start نکرده است."
+        )
+        return
+    lines = []
+    for user_id, username, first_name, created_at in rows:
+        username_text = (
+            f"@{username}"
+            if username
+            else "بدون username"
+        )
+        lines.append(
+            f"👤 {first_name}\n"
+            f"ID: {user_id}\n"
+            f"Username: {username_text}\n"
+            f"────────────"
+        )
+    await update.message.reply_text(
+        f"👥 تعداد کاربران ذخیره‌شده: {count}\n\n"
+        + "\n".join(lines)
+    )
 # =========================
 # MAIN
 # =========================
@@ -537,6 +828,7 @@ def main():
         raise RuntimeError(
             "ADMIN_USER_ID در Environment تنظیم نشده است."
         )
+    # ساخت دیتابیس
     db()
     application = (
         Application
@@ -544,6 +836,9 @@ def main():
         .token(TOKEN)
         .build()
     )
+    # =========================
+    # MUSIC COMMANDS
+    # =========================
     application.add_handler(
         CommandHandler("start", start)
     )
@@ -565,6 +860,30 @@ def main():
     application.add_handler(
         CommandHandler("desc", desc)
     )
+    # =========================
+    # INVITE COMMANDS
+    # =========================
+    application.add_handler(
+        CommandHandler("invite", invite)
+    )
+    application.add_handler(
+        CommandHandler("myinvite", myinvite)
+    )
+    application.add_handler(
+        CommandHandler("inviteid", inviteid)
+    )
+    application.add_handler(
+        CommandHandler("sendinvites", sendinvites)
+    )
+    application.add_handler(
+        CommandHandler("users", users)
+    )
+    # =========================
+    # START BOT
+    # =========================
     application.run_polling()
+# =========================
+# RUN
+# =========================
 if __name__ == "__main__":
     main()
