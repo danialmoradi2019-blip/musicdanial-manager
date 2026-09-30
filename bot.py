@@ -1,12 +1,14 @@
 import os
+import re
 import sqlite3
 import asyncio
-import tempfile
 from datetime import datetime
 from functools import wraps
+import tempfile
 
 import imageio_ffmpeg
 from dotenv import load_dotenv
+
 from telegram import Update
 from telegram.ext import (
     Application,
@@ -21,14 +23,19 @@ CHANNEL_ID = os.getenv("CHANNEL_ID", "@musicdanial2023")
 ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID", "0"))
 
 DB = "musicdanial.db"
+
 PREVIEW_SECONDS = 10
 
+
+# =========================
+# DATABASE
+# =========================
 
 def db():
     con = sqlite3.connect(DB)
 
     con.execute("""
-        CREATE TABLE IF NOT EXISTS posts(
+        CREATE TABLE IF NOT EXISTS posts (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             telegram_message_id INTEGER,
             file_id TEXT,
@@ -40,25 +47,38 @@ def db():
     """)
 
     con.commit()
+
     return con
 
 
-def admin_only(fn):
-    @wraps(fn)
+# =========================
+# ADMIN CHECK
+# =========================
+
+def admin_only(function):
+
+    @wraps(function)
     async def wrapper(update, context):
+
         if not update.effective_user:
             return
 
         if update.effective_user.id != ADMIN_USER_ID:
             return
 
-        return await fn(update, context)
+        return await function(update, context)
 
     return wrapper
 
 
+# =========================
+# CAPTION
+# =========================
+
 def make_caption(title, artist=""):
+
     if artist:
+
         return (
             f"🎵 {artist} — {title}\n\n"
             f"🎧 Music Danial\n"
@@ -72,20 +92,85 @@ def make_caption(title, artist=""):
     )
 
 
-async def create_preview(bot, file_id):
+# =========================
+# PUBLISH MUSIC
+# 10 SECOND PREVIEW
+# FROM MIDDLE OF SONG
+# THEN FULL SONG
+# =========================
+
+async def publish_music(bot, file_id, caption_text):
+
     with tempfile.TemporaryDirectory() as tmp:
 
         source = os.path.join(tmp, "source")
         preview = os.path.join(tmp, "preview.mp3")
 
+        # Download audio from Telegram
         telegram_file = await bot.get_file(file_id)
+
         await telegram_file.download_to_drive(source)
 
+        # Get FFmpeg
         ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+
+        # ---------------------------------
+        # Find song duration
+        # ---------------------------------
+
+        probe_command = [
+            ffmpeg,
+            "-i",
+            source
+        ]
+
+        probe = await asyncio.create_subprocess_exec(
+            *probe_command,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+
+        _, stderr = await probe.communicate()
+
+        duration_match = re.search(
+            r"Duration:\s*(\d+):(\d+):([\d.]+)",
+            stderr.decode(errors="ignore")
+        )
+
+        if duration_match:
+
+            hours = int(duration_match.group(1))
+            minutes = int(duration_match.group(2))
+            seconds = float(duration_match.group(3))
+
+            duration = (
+                hours * 3600
+                + minutes * 60
+                + seconds
+            )
+
+        else:
+
+            duration = 20
+
+        # ---------------------------------
+        # Calculate middle of song
+        # ---------------------------------
+
+        start_time = max(
+            0,
+            (duration / 2) - (PREVIEW_SECONDS / 2)
+        )
+
+        # ---------------------------------
+        # Create 10 second preview
+        # ---------------------------------
 
         command = [
             ffmpeg,
             "-y",
+            "-ss",
+            str(start_time),
             "-i",
             source,
             "-t",
@@ -104,118 +189,40 @@ async def create_preview(bot, file_id):
             stderr=asyncio.subprocess.PIPE
         )
 
-        _, stderr = await process.communicate()
+        _, preview_error = await process.communicate()
 
         if process.returncode != 0:
+
             raise RuntimeError(
                 "ساخت پیش‌نمایش ۱۰ ثانیه‌ای ناموفق بود."
             )
 
         if not os.path.exists(preview):
+
             raise RuntimeError(
                 "فایل پیش‌نمایش ساخته نشد."
             )
 
-        return preview
+        # ---------------------------------
+        # Send preview
+        # ---------------------------------
 
-
-async def publish_music(bot, file_id, caption_text):
-
-    with tempfile.TemporaryDirectory() as tmp:
-
-        source = os.path.join(tmp, "source")
-        preview = os.path.join(tmp, "preview.mp3")
-
-        telegram_file = await bot.get_file(file_id)
-        await telegram_file.download_to_drive(source)
-
-        ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
-
-        # دریافت مدت زمان آهنگ
-probe_command = [
-    ffmpeg,
-    "-i",
-    source
-]
-
-probe = await asyncio.create_subprocess_exec(
-    *probe_command,
-    stdout=asyncio.subprocess.PIPE,
-    stderr=asyncio.subprocess.PIPE
-)
-
-_, stderr = await probe.communicate()
-
-import re
-
-duration_match = re.search(
-    r"Duration:\s*(\d+):(\d+):([\d.]+)",
-    stderr.decode(errors="ignore")
-)
-
-if duration_match:
-    hours = int(duration_match.group(1))
-    minutes = int(duration_match.group(2))
-    seconds = float(duration_match.group(3))
-
-    duration = hours * 3600 + minutes * 60 + seconds
-else:
-    duration = 20
-
-# شروع پیش‌نمایش از وسط آهنگ
-start_time = max(
-    0,
-    (duration / 2) - (PREVIEW_SECONDS / 2)
-)
-command = [
-    ffmpeg,
-    "-y",
-    "-ss",
-    str(start_time),
-    "-i",
-    source,
-    "-t",
-    str(PREVIEW_SECONDS),
-    "-vn",
-    "-c:a",
-    "libmp3lame",
-    "-q:a",
-    "4",
-    preview
-]
-probe = await asyncio.create_subprocess_exec(
-    *probe_command,
-    stdout=asyncio.subprocess.PIPE,
-    stderr=asyncio.subprocess.PIPE
-)
-
-process = await asyncio.create_subprocess_exec(
-    *probe_command,
-    stdout=asyncio.subprocess.PIPE,
-    stderr=asyncio.subprocess.PIPE
-)
-
-        _, stderr = await process.communicate()
-
-        if process.returncode != 0:
-            raise RuntimeError(
-                "ساخت پیش‌نمایش ناموفق بود."
-            )
-
-        # اول پیش‌نمایش ۱۰ ثانیه‌ای
         with open(preview, "rb") as preview_file:
 
             await bot.send_audio(
                 chat_id=CHANNEL_ID,
                 audio=preview_file,
                 caption=(
-                    "🎧 پیش‌نمایش ۱۰ ثانیه‌ای\n\n"
+                    "🎧 پیش‌نمایش ۱۰ ثانیه‌ای از وسط آهنگ\n\n"
                     + caption_text
                 ),
                 title="Preview - 10 seconds"
             )
 
-        # سپس آهنگ کامل
+        # ---------------------------------
+        # Send full song
+        # ---------------------------------
+
         full_message = await bot.send_audio(
             chat_id=CHANNEL_ID,
             audio=file_id,
@@ -225,19 +232,27 @@ process = await asyncio.create_subprocess_exec(
         return full_message
 
 
+# =========================
+# START
+# =========================
+
 @admin_only
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(
         "🎵 Music Danial Manager آماده است.\n\n"
-        "/post عنوان | خواننده — انتشار موزیک\n"
-        "/schedule عنوان | خواننده | دقیقه — زمان‌بندی\n"
-        "/queue — صف زمان‌بندی‌شده\n"
-        "/delete شناسه — حذف پست\n"
-        "/pin شناسه — پین کردن پست\n"
-        "/desc متن — تغییر توضیحات کانال"
+        "/post عنوان | خواننده\n"
+        "/schedule عنوان | خواننده | دقیقه\n"
+        "/queue\n"
+        "/delete شناسه\n"
+        "/pin شناسه\n"
+        "/desc متن"
     )
 
+
+# =========================
+# POST
+# =========================
 
 @admin_only
 async def post(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -245,7 +260,7 @@ async def post(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message.reply_to_message:
 
         await update.message.reply_text(
-            "روی فایل موزیک Reply کن و سپس بنویس:\n"
+            "روی فایل موزیک Reply کن و سپس بنویس:\n\n"
             "/post عنوان | خواننده"
         )
 
@@ -258,7 +273,7 @@ async def post(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not media:
 
         await update.message.reply_text(
-            "پیام Reply شده باید فایل صوتی باشد."
+            "❌ پیام Reply شده باید فایل صوتی باشد."
         )
 
         return
@@ -282,23 +297,23 @@ async def post(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else ""
     )
 
-    cap = make_caption(
+    caption = make_caption(
         title,
         artist
     )
 
     try:
 
-        msg = await publish_music(
+        message = await publish_music(
             context.bot,
             media.file_id,
-            cap
+            caption
         )
 
-    except Exception as exc:
+    except Exception as error:
 
         await update.message.reply_text(
-            f"❌ انتشار انجام نشد:\n{exc}"
+            f"❌ انتشار انجام نشد:\n{error}"
         )
 
         return
@@ -307,7 +322,7 @@ async def post(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     con.execute(
         """
-        INSERT INTO posts(
+        INSERT INTO posts (
             telegram_message_id,
             file_id,
             caption,
@@ -316,9 +331,9 @@ async def post(update: Update, context: ContextTypes.DEFAULT_TYPE):
         VALUES (?, ?, ?, ?)
         """,
         (
-            msg.message_id,
+            message.message_id,
             media.file_id,
-            cap,
+            caption,
             datetime.utcnow().isoformat()
         )
     )
@@ -327,11 +342,15 @@ async def post(update: Update, context: ContextTypes.DEFAULT_TYPE):
     con.close()
 
     await update.message.reply_text(
-        "✅ منتشر شد!\n\n"
-        "🎧 ابتدا پیش‌نمایش ۱۰ ثانیه‌ای\n"
+        "✅ موزیک منتشر شد!\n\n"
+        "🎧 ابتدا ۱۰ ثانیه از وسط آهنگ\n"
         "🎵 سپس آهنگ کامل"
     )
 
+
+# =========================
+# SCHEDULE
+# =========================
 
 @admin_only
 async def schedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -339,7 +358,7 @@ async def schedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message.reply_to_message:
 
         await update.message.reply_text(
-            "روی فایل موزیک Reply کن و سپس:\n"
+            "روی فایل موزیک Reply کن و سپس:\n\n"
             "/schedule عنوان | خواننده | دقیقه"
         )
 
@@ -355,7 +374,7 @@ async def schedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(parts) < 3:
 
         await update.message.reply_text(
-            "فرمت درست:\n"
+            "فرمت درست:\n\n"
             "/schedule عنوان | خواننده | دقیقه"
         )
 
@@ -363,19 +382,19 @@ async def schedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     title = parts[0]
     artist = parts[1]
-    minutes_text = parts[2]
 
     try:
 
-        minutes = int(minutes_text)
+        minutes = int(parts[2])
 
         if minutes < 1 or minutes > 10080:
+
             raise ValueError
 
     except ValueError:
 
         await update.message.reply_text(
-            "دقیقه باید بین 1 تا 10080 باشد."
+            "❌ دقیقه باید بین 1 تا 10080 باشد."
         )
 
         return
@@ -387,21 +406,21 @@ async def schedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not media:
 
         await update.message.reply_text(
-            "پیام Reply شده باید فایل صوتی باشد."
+            "❌ پیام Reply شده باید فایل صوتی باشد."
         )
 
         return
 
-    cap = make_caption(
+    caption = make_caption(
         title,
         artist
     )
 
     con = db()
 
-    cur = con.execute(
+    cursor = con.execute(
         """
-        INSERT INTO posts(
+        INSERT INTO posts (
             file_id,
             caption,
             scheduled_at,
@@ -412,19 +431,19 @@ async def schedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
         """,
         (
             media.file_id,
-            cap,
+            caption,
             f"+{minutes}m",
             "scheduled",
             datetime.utcnow().isoformat()
         )
     )
 
-    post_id = cur.lastrowid
+    post_id = cursor.lastrowid
 
     con.commit()
     con.close()
 
-    async def publish_job(ctx):
+    async def publish_job(context):
 
         con2 = db()
 
@@ -441,8 +460,8 @@ async def schedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             try:
 
-                msg = await publish_music(
-                    ctx.bot,
+                message = await publish_music(
+                    context.bot,
                     row[0],
                     row[1]
                 )
@@ -455,7 +474,7 @@ async def schedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     WHERE id=?
                     """,
                     (
-                        msg.message_id,
+                        message.message_id,
                         post_id
                     )
                 )
@@ -475,8 +494,6 @@ async def schedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
                 con2.commit()
 
-                raise
-
         con2.close()
 
     context.job_queue.run_once(
@@ -486,10 +503,15 @@ async def schedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     await update.message.reply_text(
-        f"🕐 در صف قرار گرفت.\n"
-        f"شناسه: {post_id}"
+        f"🕐 موزیک زمان‌بندی شد.\n\n"
+        f"شناسه: {post_id}\n"
+        f"زمان: {minutes} دقیقه"
     )
 
+
+# =========================
+# QUEUE
+# =========================
 
 @admin_only
 async def queue(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -510,7 +532,7 @@ async def queue(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not rows:
 
         await update.message.reply_text(
-            "📋 صف خالی است."
+            "📋 صف زمان‌بندی خالی است."
         )
 
         return
@@ -521,14 +543,20 @@ async def queue(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     await update.message.reply_text(
-        "📋 صف:\n" + text
+        "📋 صف زمان‌بندی:\n\n"
+        + text
     )
 
+
+# =========================
+# DELETE
+# =========================
 
 @admin_only
 async def delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
+
         post_id = int(context.args[0])
 
     except (IndexError, ValueError):
@@ -553,16 +581,29 @@ async def delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not row or not row[0]:
 
         await update.message.reply_text(
-            "پست پیدا نشد یا هنوز منتشر نشده."
+            "❌ پست پیدا نشد یا هنوز منتشر نشده."
         )
 
         con.close()
+
         return
 
-    await context.bot.delete_message(
-        CHANNEL_ID,
-        row[0]
-    )
+    try:
+
+        await context.bot.delete_message(
+            chat_id=CHANNEL_ID,
+            message_id=row[0]
+        )
+
+    except Exception as error:
+
+        await update.message.reply_text(
+            f"❌ حذف نشد:\n{error}"
+        )
+
+        con.close()
+
+        return
 
     con.execute(
         """
@@ -577,14 +618,19 @@ async def delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
     con.close()
 
     await update.message.reply_text(
-        "🗑️ حذف شد."
+        "🗑️ پست حذف شد."
     )
 
+
+# =========================
+# PIN
+# =========================
 
 @admin_only
 async def pin(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
+
         post_id = int(context.args[0])
 
     except (IndexError, ValueError):
@@ -611,21 +657,35 @@ async def pin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not row or not row[0]:
 
         await update.message.reply_text(
-            "پست پیدا نشد."
+            "❌ پست پیدا نشد."
         )
 
         return
 
-    await context.bot.pin_chat_message(
-        CHANNEL_ID,
-        row[0],
-        disable_notification=True
-    )
+    try:
+
+        await context.bot.pin_chat_message(
+            chat_id=CHANNEL_ID,
+            message_id=row[0],
+            disable_notification=True
+        )
+
+    except Exception as error:
+
+        await update.message.reply_text(
+            f"❌ پین نشد:\n{error}"
+        )
+
+        return
 
     await update.message.reply_text(
-        "📌 پین شد."
+        "📌 پست پین شد."
     )
 
+
+# =========================
+# CHANNEL DESCRIPTION
+# =========================
 
 @admin_only
 async def desc(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -642,64 +702,83 @@ async def desc(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         return
 
-    await context.bot.set_chat_description(
-        CHANNEL_ID,
-        text[:255]
-    )
+    try:
+
+        await context.bot.set_chat_description(
+            chat_id=CHANNEL_ID,
+            description=text[:255]
+        )
+
+    except Exception as error:
+
+        await update.message.reply_text(
+            f"❌ توضیحات تغییر نکرد:\n{error}"
+        )
+
+        return
 
     await update.message.reply_text(
         "✅ توضیحات کانال تغییر کرد."
     )
 
 
+# =========================
+# MAIN
+# =========================
+
 def main():
 
-    if not TOKEN or ADMIN_USER_ID == 0:
+    if not TOKEN:
 
         raise RuntimeError(
-            "BOT_TOKEN و ADMIN_USER_ID را در Environment تنظیم کن."
+            "BOT_TOKEN در Environment تنظیم نشده است."
+        )
+
+    if ADMIN_USER_ID == 0:
+
+        raise RuntimeError(
+            "ADMIN_USER_ID در Environment تنظیم نشده است."
         )
 
     db()
 
-    app = (
+    application = (
         Application
         .builder()
         .token(TOKEN)
         .build()
     )
 
-    app.add_handler(
+    application.add_handler(
         CommandHandler("start", start)
     )
 
-    app.add_handler(
+    application.add_handler(
         CommandHandler("post", post)
     )
 
-    app.add_handler(
+    application.add_handler(
         CommandHandler("schedule", schedule)
     )
 
-    app.add_handler(
+    application.add_handler(
         CommandHandler("queue", queue)
     )
 
-    app.add_handler(
+    application.add_handler(
         CommandHandler("delete", delete)
     )
 
-    app.add_handler(
+    application.add_handler(
         CommandHandler("pin", pin)
     )
 
-    app.add_handler(
+    application.add_handler(
         CommandHandler("desc", desc)
     )
 
-    app.run_polling()
+    application.run_polling()
 
 
 if __name__ == "__main__":
     main()
-    
