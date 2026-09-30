@@ -131,20 +131,58 @@ async def publish_music(bot, file_id, caption_text):
 
         ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
 
-        command = [
-            ffmpeg,
-            "-y",
-            "-i",
-            source,
-            "-t",
-            str(PREVIEW_SECONDS),
-            "-vn",
-            "-c:a",
-            "libmp3lame",
-            "-q:a",
-            "4",
-            preview
-        ]
+        # دریافت مدت زمان آهنگ
+probe_command = [
+    ffmpeg,
+    "-i",
+    source
+]
+
+probe = await asyncio.create_subprocess_exec(
+    *probe_command,
+    stdout=asyncio.subprocess.PIPE,
+    stderr=asyncio.subprocess.PIPE
+)
+
+_, stderr = await probe.communicate()
+
+import re
+
+duration_match = re.search(
+    r"Duration:\s*(\d+):(\d+):([\d.]+)",
+    stderr.decode(errors="ignore")
+)
+
+if duration_match:
+    hours = int(duration_match.group(1))
+    minutes = int(duration_match.group(2))
+    seconds = float(duration_match.group(3))
+
+    duration = hours * 3600 + minutes * 60 + seconds
+else:
+    duration = 20
+
+# شروع پیش‌نمایش از وسط آهنگ
+start_time = max(
+    0,
+    (duration / 2) - (PREVIEW_SECONDS / 2)
+)
+command = [
+    ffmpeg,
+    "-y",
+    "-ss",
+    str(start_time),
+    "-i",
+    source,
+    "-t",
+    str(PREVIEW_SECONDS),
+    "-vn",
+    "-c:a",
+    "libmp3lame",
+    "-q:a",
+    "4",
+    preview
+]
 
         process = await asyncio.create_subprocess_exec(
             *command,
